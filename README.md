@@ -26,10 +26,12 @@ Implements 2D FFT and IFFT with proper center shifting logic.
 - **Butterworth:** Controlled roll-off via order parameter (\(n\))
 
 ### **High-Boost Logic**  
-Implements the formula: 
+Implements the formula:
+
 $$
 H_b(u,v) = r + (1 - r)L(u,v)
 $$
+
 to sharpen images.
 
 ### **Color Fidelity**  
@@ -158,9 +160,11 @@ python -m scripts.batch_demo
 - Transform: The input image $f(x,y)$ is transformed to the frequency domain $F(u,v)$.
 - Filter Design: A low-pass filter $L(u,v)$ is created (e.g., Gaussian).
 - High-Boost Mask: The mask is inverted and scaled:
+
 $$
 H_b(u,v) = r + (1-r)L(u,v)
 $$
+
 - If $r=1$, it returns the original image.
 - If $r>1$, high frequencies are boosted.
 - Apply & Invert: The mask is multiplied with the spectrum ($G = F \cdot H_b$), and the Inverse FFT generates the sharpened spatial image.
