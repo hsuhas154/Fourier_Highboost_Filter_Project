@@ -100,7 +100,7 @@ Includes scripts to verify Hermitian symmetry and ensure output images remain re
 - Navigate to the project directory:
 
 ```bash
-    cd FOURIER_HIGHBOOST_FILTER_PROJECT
+cd FOURIER_HIGHBOOST_FILTER_PROJECT
 ```
 
 - Install required packages:
