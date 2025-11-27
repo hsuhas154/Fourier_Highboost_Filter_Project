@@ -171,7 +171,7 @@ $$
 
 ---
 
-6. Testing & Validation
+## 6. Testing & Validation
 
 The project uses pytest to ensure mathematical accuracy. The suite checks for:
 - Correctness of FFT/IFFT round-trips.
