@@ -1,0 +1,386 @@
+import os
+import re
+import numpy as np
+from tkinter import filedialog, messagebox
+from core.color_processing import process_color_rgb, process_grayscale
+from io_utils.image_handler import read_image, detect_is_color, save_image
+from visuals.plots import compare_and_save
+from .utils import safe_clip_real, np_to_tkimage
+
+# ----------------------
+# Helpers: detection & normalization
+# ----------------------
+
+def is_single_band_satellite(path: str, arr: np.ndarray, size_threshold_bytes: int = 8 * 1024 * 1024, large_dim_thresh: int = 2000) -> bool:
+    """
+    Heuristic to detect single-band satellite rasters (conservative).
+    Returns True if arr looks like a single-band satellite image.
+    Conditions (OR logic):
+      - arr is 2D (single band) AND at least one of:
+         * file size > size_threshold_bytes (big file)
+         * max dimension > large_dim_thresh (large spatial size)
+         * dtype is uint16/int16 (higher-bit imagery)
+         * value range exceeds 0..255 (max>255)
+         * filename looks like band tile (contains '_B' + digit, or contains 'SR' or 'TOA' or 'band')
+    This is intentionally conservative (prefers false negatives over false positives).
+    """
+    if arr is None:
+        return False
+    if arr.ndim != 2:
+        return False
+
+    try:
+        fname = os.path.basename(path).upper()
+    except Exception:
+        fname = ""
+    checks = []
+    # large file size
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > size_threshold_bytes:
+            checks.append(True)
+    except Exception:
+        pass
+    # large dimension
+    try:
+        if max(arr.shape) >= large_dim_thresh:
+            checks.append(True)
+    except Exception:
+        pass
+    # dtype heavy
+    try:
+        if arr.dtype in (np.uint16, np.int16):
+            checks.append(True)
+    except Exception:
+        pass
+    # value range
+    try:
+        if float(np.nanmax(arr)) > 255:
+            checks.append(True)
+    except Exception:
+        pass
+    # filename pattern (Landsat-like)
+    if re.search(r"_B\d+(_|\.|$)", fname) or "SR" in fname or "TOA" in fname or "BAND" in fname:
+        checks.append(True)
+
+    return any(checks)
+
+
+def _looks_like_satellite(path: str, arr: np.ndarray, size_threshold_bytes: int = 40 * 1024 * 1024) -> bool:
+    """
+    Heuristic to detect scientific / high-bit-depth rasters that need preview normalization.
+    Returns True if arr/path likely represent a raster to normalize:
+      - dtype is uint16/int16 OR
+      - pixel values exceed 8-bit range (max > 255) OR
+      - file size is large (> size_threshold_bytes)
+    """
+    try:
+        if arr.dtype in (np.uint16, np.int16):
+            return True
+    except Exception:
+        pass
+
+    try:
+        # If array numeric and contains values > 255
+        if np.nanmax(arr) > 255:
+            return True
+    except Exception:
+        # ignore
+        pass
+
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > size_threshold_bytes:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def normalize_to_uint8(arr: np.ndarray, clip_percentiles=(1, 99)) -> np.ndarray:
+    """
+    Normalize a numeric array to uint8 for display.
+    Uses percentile stretch by default to reduce effect of outliers.
+    """
+    arrf = arr.astype(np.float32)
+    arrf = np.nan_to_num(arrf, nan=0.0, posinf=np.nanmax(arrf), neginf=np.nanmin(arrf))
+    p_low, p_high = clip_percentiles
+
+    try:
+        if p_low is not None and p_high is not None and 0 <= p_low < p_high <= 100:
+            vmin = float(np.percentile(arrf, p_low))
+            vmax = float(np.percentile(arrf, p_high))
+        else:
+            vmin = float(np.min(arrf))
+            vmax = float(np.max(arrf))
+    except Exception:
+        vmin = float(np.min(arrf))
+        vmax = float(np.max(arrf))
+
+    if vmax <= vmin:
+        out = np.clip(arrf - vmin, 0, 255)
+        return out.astype(np.uint8)
+
+    scaled = (arrf - vmin) / (vmax - vmin)
+    scaled = (scaled * 255.0).clip(0, 255)
+    return scaled.astype(np.uint8)
+
+
+def normalize_to_float_for_processing(arr: np.ndarray, clip_percentiles=(1, 99)) -> np.ndarray:
+    """
+    Normalize numeric array to float64 scaled to the range 0..255 for processing.
+    Uses percentile stretch (same idea as normalize_to_uint8) but returns float64.
+    This preserves dynamics for the core processing steps.
+    """
+    arrf = arr.astype(np.float64)
+    arrf = np.nan_to_num(arrf, nan=0.0, posinf=np.nanmax(arrf), neginf=np.nanmin(arrf))
+    p_low, p_high = clip_percentiles
+
+    try:
+        if p_low is not None and p_high is not None and 0 <= p_low < p_high <= 100:
+            vmin = float(np.percentile(arrf, p_low))
+            vmax = float(np.percentile(arrf, p_high))
+        else:
+            vmin = float(np.min(arrf))
+            vmax = float(np.max(arrf))
+    except Exception:
+        vmin = float(np.min(arrf))
+        vmax = float(np.max(arrf))
+
+    if vmax <= vmin:
+        out = np.clip(arrf - vmin, 0.0, 255.0)
+        return out.astype(np.float64)
+
+    scaled = (arrf - vmin) / (vmax - vmin)
+    scaled = (scaled * 255.0)
+    return scaled.astype(np.float64)
+
+
+# ----------------------
+# Logging helper
+# ----------------------
+def _safe_log(app, *args, **kwargs):
+    """Try to write to app.log if present, otherwise print to stdout."""
+    msg = " ".join(str(a) for a in args) if args else kwargs.get("msg", "")
+    try:
+        if hasattr(app, "log") and callable(getattr(app, "log")):
+            app.log(msg)
+        else:
+            print(msg)
+    except Exception:
+        # As a last resort, print so we don't crash the GUI callback.
+        print(msg)
+
+
+# ----------------------
+# Callbacks
+# ----------------------
+def open_image_callback(app):
+    """Handle file selection and preview update."""
+    path = filedialog.askopenfilename(
+        title="Select Image",
+        filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tif *.bmp *.gif"), ("All Files", "*.*")]
+    )
+    if not path:
+        return
+
+    # read image using project IO util
+    arr, _meta = read_image(path)
+
+    # Keep the raw array available for later processing.
+    # Do not overwrite it when creating a preview.
+    app.raw_image = arr
+
+    # optional debug log (helps diagnose satellite loads)
+    _safe_log(app, f"Loaded: {path} shape={getattr(arr,'shape',None)} dtype={getattr(arr,'dtype',None)} min={np.nanmin(arr)} max={np.nanmax(arr)} meta={_meta}")
+
+    # --- NEW: detect single-band satellite and handle specially ---
+    if is_single_band_satellite(path, arr):
+        # create a display preview (percentile stretch to uint8)
+        def stretch_to_uint8(band, lo=1, hi=99):
+            bandf = band.astype(np.float64)
+            bandf = np.nan_to_num(bandf, nan=0.0, posinf=np.nanmax(bandf), neginf=np.nanmin(bandf))
+            lo_v = float(np.nanpercentile(bandf, lo))
+            hi_v = float(np.nanpercentile(bandf, hi))
+            if hi_v <= lo_v:
+                return np.clip((bandf - lo_v), 0, 255).astype(np.uint8)
+            scaled = (bandf - lo_v) / (hi_v - lo_v)
+            return np.clip((scaled * 255.0), 0, 255).astype(np.uint8)
+
+        # create preview uint8 and downscale thumbnail for GUI preview
+        preview_band = stretch_to_uint8(arr, lo=1, hi=99)
+        # if very large, create thumbnail (preserve preview array for internal use)
+        try:
+            from PIL import Image
+            pil = Image.fromarray(preview_band)
+            # make a thumbnail for app.image_np (reduce to <=1024 on largest side)
+            max_side = 1024
+            if max(preview_band.shape) > max_side:
+                pil_thumb = pil.copy()
+                pil_thumb.thumbnail((max_side, max_side), Image.BILINEAR)
+                preview_arr = np.array(pil_thumb)
+            else:
+                preview_arr = preview_band
+        except Exception:
+            preview_arr = preview_band
+
+        # mark processing to use float normalization to preserve dynamics (no clipping)
+        arr_for_proc = normalize_to_float_for_processing(arr, clip_percentiles=(1, 99))
+        is_color_proc = False
+
+    else:
+        # existing behavior (keeps your previous satellite heuristics too)
+        if _looks_like_satellite(path, arr, size_threshold_bytes=40 * 1024 * 1024):
+            if arr.ndim == 3 and arr.shape[2] > 3:
+                preview_band = arr[..., 0]
+                preview_arr = normalize_to_uint8(preview_band, clip_percentiles=(1, 99))
+            elif arr.ndim == 3 and arr.shape[2] in (2, 3, 4):
+                chans = []
+                for ch in range(min(3, arr.shape[2])):
+                    chans.append(normalize_to_uint8(arr[..., ch], clip_percentiles=(1, 99)))
+                preview_arr = np.stack(chans, axis=-1)
+            else:
+                preview_arr = normalize_to_uint8(arr, clip_percentiles=(1, 99))
+        else:
+            preview_arr = arr
+
+    # default processing array if not a disk-read 'single-band-satellite' path
+    arr_for_proc = normalize_to_float_for_processing(arr, clip_percentiles=(1, 99))
+    is_color_proc = detect_is_color(arr)
+
+    # set preview image for display
+    app.image_np = preview_arr
+    app.is_color = detect_is_color(preview_arr)
+    try:
+        # set the image_path variable if available
+        if hasattr(app, "image_path"):
+            app.image_path.set(path)
+    except Exception:
+        pass
+
+    # show preview (guard if method exists)
+    try:
+        app.preview_original(preview_arr)
+    except Exception:
+        pass
+
+    _safe_log(app, f"Loaded: {os.path.basename(path)} ({'Color' if app.is_color else 'Grayscale'})")
+
+
+def run_highboost_callback(app):
+    """Perform high-boost filtering on current image."""
+    if not hasattr(app, "image_np") or app.image_np is None:
+        messagebox.showwarning("No Image", "Please open an image first.")
+        return
+
+    # Parameters from UI (guarded access)
+    mask_type = getattr(app, "filter_type", None)
+    try:
+        mask_type = mask_type.get().lower() if mask_type is not None else "gaussian"
+    except Exception:
+        mask_type = "gaussian"
+
+    try:
+        D0 = float(app.D0_val.get())
+    except Exception:
+        D0 = 50.0
+    try:
+        r = float(app.r_val.get())
+    except Exception:
+        r = 1.8
+    try:
+        order = int(app.order_val.get()) if mask_type == "butterworth" else 2
+    except Exception:
+        order = 2
+    do_linear = bool(getattr(app, "srgb_linearize", False) and getattr(app, "srgb_linearize").get())
+
+    _safe_log(app, f"Running High-Boost ({mask_type}, D0={D0}, r={r}, order={order}) ...")
+
+    # Decide which array to process:
+    # - If raw_image exists, use a float-normalized version of it for processing (preserves dynamics).
+    # - Otherwise use the preview image (app.image_np).
+    if hasattr(app, "raw_image") and app.raw_image is not None:
+        arr_for_proc = normalize_to_float_for_processing(app.raw_image, clip_percentiles=(1, 99))
+        # determine color/grayscale from the raw image if possible
+        is_color_proc = detect_is_color(app.raw_image) if app.raw_image is not None else getattr(app, "is_color", False)
+    else:
+        arr_for_proc = normalize_to_float_for_processing(app.image_np, clip_percentiles=(1, 99))
+        is_color_proc = getattr(app, "is_color", False)
+
+    is_color = bool(is_color_proc)
+
+    try:
+        if is_color:
+            out_img = process_color_rgb(
+                arr_for_proc, mask_builder=None,
+                mask_kwargs={"mask_type": mask_type, "D0": D0, "order": order},
+                r=r, do_srgb_linearize=do_linear, return_intermediates=False
+            )
+        else:
+            out_img = process_grayscale(
+                arr_for_proc, mask_builder=None,
+                mask_kwargs={"mask_type": mask_type, "D0": D0, "order": order},
+                r=r, do_srgb_linearize=False, return_intermediates=False
+            )
+    except Exception as e:
+        # report error and stop
+        _safe_log(app, f"Processing error: {e}")
+        messagebox.showerror("Processing Error", f"High-boost processing failed:\n{e}")
+        return
+
+    out_img = safe_clip_real(out_img)
+    app.output_np = out_img
+    try:
+        app.preview_boosted(out_img)
+    except Exception:
+        pass
+
+    _safe_log(app, "High-Boost complete.")
+
+
+def save_output_callback(app):
+    """Save the last computed boosted image to a file (safe logging)."""
+    try:
+        # ensure there is an output
+        if not hasattr(app, "output_np") or app.output_np is None:
+            messagebox.showwarning("No Output", "There is no boosted image to save. Run the filter first.")
+            return
+
+        # ask for save path
+        suggested = os.path.join("results", "boosted_output.png")
+        save_path = filedialog.asksaveasfilename(
+            title="Save Boosted Image",
+            initialfile=os.path.basename(suggested),
+            defaultextension=".png",
+            filetypes=[("PNG Image", "*.png"), ("JPEG Image", "*.jpg;*.jpeg"), ("TIFF Image", "*.tif;*.tiff")]
+        )
+        if not save_path:
+            _safe_log(app, "Save cancelled.")
+            return
+
+        # write using project IO util (use save_image if available)
+        try:
+            # if you have save_image wrapper in your codebase:
+            from io_utils.image_handler import save_image
+            save_image(save_path, app.output_np)
+        except Exception:
+            # fallback: use PIL directly
+            from PIL import Image
+            arr = app.output_np
+            if arr.dtype != np.uint8:
+                # attempt scaling/clip to uint8
+                arr = np.clip(arr, 0, 255).astype(np.uint8)
+            Image.fromarray(arr).save(save_path)
+
+        _safe_log(app, f"Saved boosted image → {save_path}")
+        # also display a success popup
+        try:
+            messagebox.showinfo("Saved", f"Saved boosted image →\n{save_path}")
+        except Exception:
+            pass
+
+    except Exception as e:
+        _safe_log(app, f"Save failed: {e}")
+        try:
+            messagebox.showerror("Save Error", f"Saving failed:\n{e}")
+        except Exception:
+            pass

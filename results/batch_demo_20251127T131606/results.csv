@@ -1,0 +1,2 @@
+input_path,is_color,out_boosted_path,fft_spectrum_path,mask_path,highboost_mask_path,max_imag_G_shifted,max_imag_out_float,used_real_output,D0,r,mask_type
+data/FCC_Image_2.png,True,results\batch_demo_20251127T131606\FCC_Image_2\FCC_Image_2_boosted.png,results\batch_demo_20251127T131606\FCC_Image_2\fft_spectrum.png,results\batch_demo_20251127T131606\FCC_Image_2\filter_mask.png,results\batch_demo_20251127T131606\FCC_Image_2\highpass_mask.png,32115561.988153566,0.0,False,100.0,6.0,gaussian
