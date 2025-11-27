@@ -118,7 +118,7 @@ To create an exact replica of the development environment:
 conda env create -f environment.yml
 ```
 
-**Note: This would install everything in the base environment. If you want to create a new project specific environment and install all the required packages and libraries in that enviroment, which is highly recommended, the cooresponding instructions are given in the User_Manual PDF present in the docs/ directory.**
+**Note: This would install everything in the base environment. If you want to create a new project specific environment and install all the required packages and libraries in that enviroment, which is highly recommended, the corresponding instructions are given in the User_Manual PDF present in the docs/ directory.**
 
 ---
 
